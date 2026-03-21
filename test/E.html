@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Mic Wave + Subtitle Visualizer (Robust)</title>
+<style>
+body {
+  margin: 0;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: white;
+  font-family: sans-serif;
+}
+canvas {
+  width: 100%;
+  height: 300px;
+}
+button {
+  padding: 12px 24px;
+  font-size: 16px;
+  cursor: pointer;
+  background: #00ffcc;
+  border: none;
+  border-radius: 5px;
+  font-weight: bold;
+}
+#subtitle {
+  margin-top: 20px;
+  font-size: 20px;
+  color: #0ff;
+  text-shadow: 0 0 10px #0ff;
+}
+#status {
+  margin-top: 10px;
+  font-size: 14px;
+  color: #f88;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+
+<canvas id="visualizer"></canvas>
+<button id="startBtn">開始</button>
+<div id="subtitle">...</div>
+<div id="status"></div>
+
+<script>
+const canvas = document.getElementById('visualizer');
+const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('startBtn');
+const subtitle = document.getElementById('subtitle');
+const statusEl = document.getElementById('status');
+
+let audioCtx, analyser, timeArray;
+let recognition;
+let fallbackMode = false;
+
+// ===== テスト =====
+function runTests() {
+  console.assert(!!canvas, 'canvas取得失敗');
+  console.assert(!!ctx, 'canvas context取得失敗');
+  console.assert(typeof navigator.mediaDevices !== 'undefined', 'mediaDevices未対応');
+  console.assert(typeof requestAnimationFrame !== 'undefined', 'RAF未対応');
+  console.log('テストOK');
+}
+runTests();
+
+// ===== キャンバス解像度補正 =====
+function resizeCanvas() {
+  canvas.width = canvas.clientWidth;
+  canvas.height = canvas.clientHeight;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ===== HTTPSチェック =====
+function checkSecureContext() {
+  if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+    statusEl.textContent = '⚠ HTTPSまたはlocalhostで実行してください';
+    return false;
+  }
+  return true;
+}
+
+// ===== フォールバック（疑似波形） =====
+function enableFallback() {
+  fallbackMode = true;
+  statusEl.textContent = '⚠ マイク未許可 → デモモードで動作中';
+  startBtn.style.display = 'none';
+  draw();
+}
+
+startBtn.onclick = async () => {
+  statusEl.textContent = '';
+
+  if (!checkSecureContext()) return;
+
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const source = audioCtx.createMediaStreamSource(stream);
+    source.connect(analyser);
+
+    analyser.fftSize = 256;
+    timeArray = new Uint8Array(analyser.fftSize);
+
+  } catch (err) {
+    console.error(err);
+
+    if (err.name === 'NotAllowedError') {
+      statusEl.textContent = '❌ マイク拒否 → 設定から許可してください（右上🔒）';
+      enableFallback();
+      return;
+    }
+
+    if (err.name === 'NotFoundError') {
+      statusEl.textContent = '❌ マイクが見つかりません';
+      enableFallback();
+      return;
+    }
+
+    statusEl.textContent = '❌ エラー: ' + err.message;
+    enableFallback();
+    return;
+  }
+
+  // ===== 音声認識 =====
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.lang = 'ja-JP';
+    recognition.continuous = true;
+
+    recognition.onresult = (event) => {
+      const text = event.results[event.results.length - 1][0].transcript;
+      subtitle.textContent = `[受信] ${text}`;
+    };
+
+    recognition.onerror = (e) => {
+      console.warn('Speech error:', e);
+    };
+
+    recognition.start();
+  } else {
+    subtitle.textContent = '音声認識未対応';
+  }
+
+  startBtn.style.display = 'none';
+  draw();
+};
+
+function draw() {
+  requestAnimationFrame(draw);
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#0ff';
+  ctx.beginPath();
+
+  const length = fallbackMode ? 128 : timeArray.length;
+  const sliceWidth = canvas.width / length;
+
+  let x = 0;
+
+  for (let i = 0; i < length; i++) {
+    let v;
+
+    if (fallbackMode) {
+      v = 1 + Math.sin(i * 0.2 + Date.now() * 0.005);
+    } else {
+      analyser.getByteTimeDomainData(timeArray);
+      v = timeArray[i] / 128.0;
+    }
+
+    const y = (v * canvas.height) / 2;
+
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+
+    x += sliceWidth;
+  }
+
+  ctx.lineTo(canvas.width, canvas.height / 2);
+  ctx.stroke();
+}
+</script>
+
+</body>
+</html>
