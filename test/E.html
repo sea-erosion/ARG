@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Mic Wave + Subtitle Visualizer (Robust)</title>
+<title>Mic Wave + Subtitle Visualizer (ARG Log UI)</title>
 <style>
 body {
   margin: 0;
@@ -13,64 +13,72 @@ body {
   justify-content: center;
   height: 100vh;
   color: white;
-  font-family: sans-serif;
+  font-family: monospace;
+  transition: background 0.2s, transform 0.05s, filter 0.05s;
 }
-canvas {
-  width: 100%;
-  height: 300px;
-}
+canvas { width: 100%; height: 250px; }
 button {
-  padding: 12px 24px;
-  font-size: 16px;
-  cursor: pointer;
-  background: #00ffcc;
-  border: none;
-  border-radius: 5px;
-  font-weight: bold;
+  padding: 12px 24px; font-size: 16px; cursor: pointer;
+  background: #00ffcc; border: none; border-radius: 5px; font-weight: bold;
 }
-#subtitle {
+#log {
   margin-top: 20px;
-  font-size: 20px;
-  color: #0ff;
-  text-shadow: 0 0 10px #0ff;
-}
-#status {
-  margin-top: 10px;
+  width: 80%;
+  max-height: 200px;
+  overflow-y: auto;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid #0ff;
+  padding: 10px;
   font-size: 14px;
-  color: #f88;
-  text-align: center;
+  box-shadow: 0 0 10px #0ff;
 }
+.log-line {
+  margin: 2px 0;
+  color: #0ff;
+}
+#status { margin-top: 10px; font-size: 12px; color: #f88; }
 </style>
 </head>
 <body>
 
 <canvas id="visualizer"></canvas>
 <button id="startBtn">開始</button>
-<div id="subtitle">...</div>
+<div id="log"></div>
 <div id="status"></div>
 
 <script>
 const canvas = document.getElementById('visualizer');
 const ctx = canvas.getContext('2d');
 const startBtn = document.getElementById('startBtn');
-const subtitle = document.getElementById('subtitle');
+const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
 
 let audioCtx, analyser, timeArray;
 let recognition;
 let fallbackMode = false;
+let lastVolume = 0;
+let glitchLock = false;
 
-// ===== テスト =====
-function runTests() {
-  console.assert(!!canvas, 'canvas取得失敗');
-  console.assert(!!ctx, 'canvas context取得失敗');
-  console.assert(typeof navigator.mediaDevices !== 'undefined', 'mediaDevices未対応');
-  console.assert(typeof requestAnimationFrame !== 'undefined', 'RAF未対応');
-  console.log('テストOK');
+// ===== ログ追加 =====
+function addLog(text) {
+  const line = document.createElement('div');
+  line.className = 'log-line';
+
+  // ノイズ混入（文字化け）
+  const noisy = text.replace(/./g, c => Math.random() < 0.05 ? '█' : c);
+
+  line.textContent = `[受信] ${noisy}`;
+  logEl.appendChild(line);
+
+  // 自動スクロール
+  logEl.scrollTop = logEl.scrollHeight;
+
+  // 最大行数制限
+  if (logEl.children.length > 30) {
+    logEl.removeChild(logEl.firstChild);
+  }
 }
-runTests();
 
-// ===== キャンバス解像度補正 =====
 function resizeCanvas() {
   canvas.width = canvas.clientWidth;
   canvas.height = canvas.clientHeight;
@@ -78,28 +86,14 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
-// ===== HTTPSチェック =====
-function checkSecureContext() {
-  if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-    statusEl.textContent = '⚠ HTTPSまたはlocalhostで実行してください';
-    return false;
-  }
-  return true;
-}
-
-// ===== フォールバック（疑似波形） =====
 function enableFallback() {
   fallbackMode = true;
-  statusEl.textContent = '⚠ マイク未許可 → デモモードで動作中';
+  statusEl.textContent = '⚠ デモモード';
   startBtn.style.display = 'none';
   draw();
 }
 
 startBtn.onclick = async () => {
-  statusEl.textContent = '';
-
-  if (!checkSecureContext()) return;
-
   try {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioCtx.createAnalyser();
@@ -112,49 +106,57 @@ startBtn.onclick = async () => {
     timeArray = new Uint8Array(analyser.fftSize);
 
   } catch (err) {
-    console.error(err);
-
-    if (err.name === 'NotAllowedError') {
-      statusEl.textContent = '❌ マイク拒否 → 設定から許可してください（右上🔒）';
-      enableFallback();
-      return;
-    }
-
-    if (err.name === 'NotFoundError') {
-      statusEl.textContent = '❌ マイクが見つかりません';
-      enableFallback();
-      return;
-    }
-
-    statusEl.textContent = '❌ エラー: ' + err.message;
     enableFallback();
     return;
   }
 
-  // ===== 音声認識 =====
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (SpeechRecognition) {
     recognition = new SpeechRecognition();
     recognition.lang = 'ja-JP';
     recognition.continuous = true;
 
+    const TRIGGERS = ['起動','解除','侵入','開放','プロトコル'];
+
     recognition.onresult = (event) => {
       const text = event.results[event.results.length - 1][0].transcript;
-      subtitle.textContent = `[受信] ${text}`;
-    };
 
-    recognition.onerror = (e) => {
-      console.warn('Speech error:', e);
+      addLog(text);
+
+      if (TRIGGERS.some(k => text.includes(k))) {
+        triggerGlitch(Math.min(1.5, 0.5 + lastVolume));
+      }
     };
 
     recognition.start();
-  } else {
-    subtitle.textContent = '音声認識未対応';
   }
 
   startBtn.style.display = 'none';
   draw();
 };
+
+function triggerGlitch(intensity = 1) {
+  if (glitchLock) return;
+  glitchLock = true;
+
+  let count = 0;
+  const max = Math.floor(20 * intensity);
+
+  const glitch = setInterval(() => {
+    document.body.style.background = `hsl(${Math.random()*360},100%,50%)`;
+    document.body.style.transform = `translate(${(Math.random()*20-10)*intensity}px, ${(Math.random()*20-10)*intensity}px)`;
+    document.body.style.filter = `hue-rotate(${Math.random()*360}deg)`;
+
+    count++;
+    if (count > max) {
+      clearInterval(glitch);
+      document.body.style.background = '#000';
+      document.body.style.transform = 'none';
+      document.body.style.filter = 'none';
+      glitchLock = false;
+    }
+  }, 40);
+}
 
 function draw() {
   requestAnimationFrame(draw);
@@ -169,16 +171,20 @@ function draw() {
   const sliceWidth = canvas.width / length;
 
   let x = 0;
+  let sum = 0;
+
+  if (!fallbackMode && analyser) {
+    analyser.getByteTimeDomainData(timeArray);
+  }
 
   for (let i = 0; i < length; i++) {
-    let v;
+    let v = fallbackMode
+      ? 1 + Math.sin(i * 0.2 + Date.now() * 0.005)
+      : timeArray[i] / 128.0;
 
-    if (fallbackMode) {
-      v = 1 + Math.sin(i * 0.2 + Date.now() * 0.005);
-    } else {
-      analyser.getByteTimeDomainData(timeArray);
-      v = timeArray[i] / 128.0;
-    }
+    v += (Math.random() - 0.5) * 0.3;
+
+    sum += v;
 
     const y = (v * canvas.height) / 2;
 
@@ -190,6 +196,8 @@ function draw() {
 
   ctx.lineTo(canvas.width, canvas.height / 2);
   ctx.stroke();
+
+  lastVolume = sum / length;
 }
 </script>
 
